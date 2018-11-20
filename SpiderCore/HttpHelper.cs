@@ -1,6 +1,7 @@
 ﻿using System;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
@@ -14,278 +15,405 @@ namespace SpiderCore
     /// </summary>
     public class HttpHelper
     {
+        #region 预定义方变量
         //默认的编码
-        private Encoding _encoding = Encoding.Default;
+        private Encoding encoding = Encoding.Default;
         //Post数据编码
-        private Encoding _postencoding = Encoding.Default;
-
+        private Encoding postencoding = Encoding.Default;
         //HttpWebRequest对象用来发起请求
-        private HttpWebRequest _request;
-
+        private HttpWebRequest request = null;
         //获取影响流的数据对象
-        private HttpWebResponse _response;
+        private HttpWebResponse response = null;
+        //设置本地的出口ip和端口
+        private IPEndPoint _IPEndPoint = null;
+        #endregion
+
+        #region Public
 
         /// <summary>
         /// 根据相传入的数据，得到相应页面数据
         /// </summary>
-        /// <param name="objhttpitem">参数类对象</param>
+        /// <param name="item">参数类对象</param>
         /// <returns>返回HttpResult类型</returns>
-        public HttpResult GetHtml(HttpItem objhttpitem)
+        public HttpResult GetHtml(HttpItem item)
         {
             //返回参数
-            var result = new HttpResult();
+            HttpResult result = new HttpResult();
             try
             {
                 //准备参数
-                SetRequest(objhttpitem);
+                SetRequest(item);
             }
             catch (Exception ex)
             {
-                result = new HttpResult
-                {
-                    Cookie = string.Empty,
-                    Header = null,
-                    Html = ex.Message,
-                    StatusDescription = "配置参数时出错：" + ex.Message
-                };
-                return result;
+                //配置参数时出错
+                return new HttpResult() { Cookie = string.Empty, Header = null, Html = ex.Message, StatusDescription = "配置参数时出错：" + ex.Message };
             }
             try
             {
-                using (_response = (HttpWebResponse)_request.GetResponse())
+                //请求数据
+                using (response = (HttpWebResponse)request.GetResponse())
                 {
-                    result.StatusCode = _response.StatusCode;
-                    result.StatusDescription = _response.StatusDescription;
-                    result.Header = _response.Headers;
-                    if (_response.Cookies != null) result.CookieCollection = _response.Cookies;
-                    if (_response.Headers["set-cookie"] != null) result.Cookie = _response.Headers["set-cookie"];
-                    //GZIIP处理
-                    MemoryStream stream = GetMemoryStream(_response.ContentEncoding.Equals("gzip", StringComparison.InvariantCultureIgnoreCase) ?
-                        // ReSharper disable AssignNullToNotNullAttribute
-                                                              new GZipStream(_response.GetResponseStream(), CompressionMode.Decompress) :
-                        // ReSharper restore AssignNullToNotNullAttribute
-                                                              _response.GetResponseStream());
-                    //获取Byte
-                    byte[] rawResponse = stream.ToArray();
-                    stream.Close();
-                    //是否返回Byte类型数据
-                    if (objhttpitem.ResultType == ResultType.Byte) result.ResultByte = rawResponse;
-                    //从这里开始我们要无视编码了
-                    if (_encoding == null)
-                    {
-                        Match meta = Regex.Match(Encoding.Default.GetString(rawResponse), "<meta([^<]*)charset=([^<]*)[\"']", RegexOptions.IgnoreCase);
-                        string charter = (meta.Groups.Count > 1) ? meta.Groups[2].Value.ToLower() : string.Empty;
-                        if (charter.Length > 2)
-                            _encoding = Encoding.GetEncoding(charter.Trim().Replace("\"", "").Replace("'", "").Replace(";", "").Replace("iso-8859-1", "gbk"));
-                        else
-                        {
-                            _encoding = string.IsNullOrEmpty(_response.CharacterSet) ? Encoding.UTF8 :
-                                Encoding.GetEncoding(_response.CharacterSet);
-                        }
-                    }
-                    //得到返回的HTML
-                    result.Html = _encoding.GetString(rawResponse);
+                    GetData(item, result);
                 }
             }
             catch (WebException ex)
             {
-                //这里是在发生异常时返回的错误信息
-                _response = (HttpWebResponse)ex.Response;
-                result.Html = ex.Message;
-                if (_response != null)
+                if (ex.Response != null)
                 {
-                    result.StatusCode = _response.StatusCode;
-                    result.StatusDescription = _response.StatusDescription;
+                    using (response = (HttpWebResponse)ex.Response)
+                    {
+                        GetData(item, result);
+                    }
+                }
+                else
+                {
+                    result.Html = ex.Message;
                 }
             }
             catch (Exception ex)
             {
                 result.Html = ex.Message;
             }
-            if (objhttpitem.IsToLower) result.Html = result.Html.ToLower();
+            if (item.IsToLower) result.Html = result.Html.ToLower();
+            //重置request，response为空
+            if (item.IsReset)
+            {
+                request = null;
+                response = null;
+            }
             return result;
         }
+        #endregion
+
+        #region GetData
 
         /// <summary>
-        /// 4.0以下.net版本取数据使用
+        /// 获取数据的并解析的方法
         /// </summary>
-        /// <param name="streamResponse">流</param>
-        private static MemoryStream GetMemoryStream(Stream streamResponse)
+        /// <param name="item"></param>
+        /// <param name="result"></param>
+        private void GetData(HttpItem item, HttpResult result)
         {
-            var stream = new MemoryStream();
-            const int length = 256;
-            var buffer = new Byte[length];
-            int bytesRead = streamResponse.Read(buffer, 0, length);
-            while (bytesRead > 0)
+            if (response == null)
             {
-                stream.Write(buffer, 0, bytesRead);
-                bytesRead = streamResponse.Read(buffer, 0, length);
+                return;
             }
-            return stream;
+            #region base
+            //获取StatusCode
+            result.StatusCode = response.StatusCode;
+            //获取StatusDescription
+            result.StatusDescription = response.StatusDescription;
+            //获取Headers
+            result.Header = response.Headers;
+            //获取最后访问的URl
+            result.ResponseUri = response.ResponseUri.ToString();
+            //获取CookieCollection
+            if (response.Cookies != null) result.CookieCollection = response.Cookies;
+            //获取set-cookie
+            if (response.Headers["set-cookie"] != null) result.Cookie = response.Headers["set-cookie"];
+            #endregion
+
+            #region byte
+            //处理网页Byte
+            byte[] ResponseByte = GetByte();
+            #endregion
+
+            #region Html
+            if (ResponseByte != null && ResponseByte.Length > 0)
+            {
+                //设置编码
+                SetEncoding(item, result, ResponseByte);
+                //得到返回的HTML
+                result.Html = encoding.GetString(ResponseByte);
+            }
+            else
+            {
+                //没有返回任何Html代码
+                result.Html = string.Empty;
+            }
+            #endregion
         }
+        /// <summary>
+        /// 设置编码
+        /// </summary>
+        /// <param name="item">HttpItem</param>
+        /// <param name="result">HttpResult</param>
+        /// <param name="ResponseByte">byte[]</param>
+        private void SetEncoding(HttpItem item, HttpResult result, byte[] ResponseByte)
+        {
+            //是否返回Byte类型数据
+            if (item.ResultType == ResultType.Byte) result.ResultByte = ResponseByte;
+            //从这里开始我们要无视编码了
+            if (encoding == null)
+            {
+                Match meta = Regex.Match(Encoding.Default.GetString(ResponseByte), "<meta[^<]*charset=([^<]*)[\"']", RegexOptions.IgnoreCase);
+                string c = string.Empty;
+                if (meta != null && meta.Groups.Count > 0)
+                {
+                    c = meta.Groups[1].Value.ToLower().Trim();
+                }
+                if (c.Length > 2)
+                {
+                    try
+                    {
+                        encoding = Encoding.GetEncoding(c.Replace("\"", string.Empty).Replace("'", "").Replace(";", "").Replace("iso-8859-1", "gbk").Trim());
+                    }
+                    catch
+                    {
+                        if (string.IsNullOrEmpty(response.CharacterSet))
+                        {
+                            encoding = Encoding.UTF8;
+                        }
+                        else
+                        {
+                            encoding = Encoding.GetEncoding(response.CharacterSet);
+                        }
+                    }
+                }
+                else
+                {
+                    if (string.IsNullOrEmpty(response.CharacterSet))
+                    {
+                        encoding = Encoding.UTF8;
+                    }
+                    else
+                    {
+                        encoding = Encoding.GetEncoding(response.CharacterSet);
+                    }
+                }
+            }
+        }
+        /// <summary>
+        /// 提取网页Byte
+        /// </summary>
+        /// <returns></returns>
+        private byte[] GetByte()
+        {
+            byte[] ResponseByte = null;
+            using (MemoryStream _stream = new MemoryStream())
+            {
+                //GZIIP处理
+                if (response.ContentEncoding != null && response.ContentEncoding.Equals("gzip", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    //开始读取流并设置编码方式
+                    new GZipStream(response.GetResponseStream(), CompressionMode.Decompress).CopyTo(_stream, 10240);
+                }
+                else
+                {
+                    //开始读取流并设置编码方式
+                    response.GetResponseStream().CopyTo(_stream, 10240);
+                }
+                //获取Byte
+                ResponseByte = _stream.ToArray();
+            }
+            return ResponseByte;
+        }
+
+
+        #endregion
+
+        #region SetRequest
 
         /// <summary>
         /// 为请求准备参数
         /// </summary>
-        ///<param name="objhttpItem">参数列表</param>
-        private void SetRequest(HttpItem objhttpItem)
+        ///<param name="item">参数列表</param>
+        private void SetRequest(HttpItem item)
         {
+
             // 验证证书
-            SetCer(objhttpItem);
+            SetCer(item);
+            if (item.IPEndPoint != null)
+            {
+                _IPEndPoint = item.IPEndPoint;
+                //设置本地的出口ip和端口
+                request.ServicePoint.BindIPEndPointDelegate = new BindIPEndPoint(BindIPEndPointCallback);
+            }
             //设置Header参数
-            if (objhttpItem.Header != null && objhttpItem.Header.Count > 0) foreach (string item in objhttpItem.Header.AllKeys)
+            if (item.Header != null && item.Header.Count > 0)
+                foreach (string key in item.Header.AllKeys)
                 {
-                    _request.Headers.Add(item, objhttpItem.Header[item]);
+                    request.Headers.Add(key, item.Header[key]);
                 }
             // 设置代理
-            SetProxy(objhttpItem);
-            if (objhttpItem.ProtocolVersion != null) _request.ProtocolVersion = objhttpItem.ProtocolVersion;
-            _request.ServicePoint.Expect100Continue = objhttpItem.Expect100Continue;
+            SetProxy(item);
+            if (item.ProtocolVersion != null) request.ProtocolVersion = item.ProtocolVersion;
+            request.ServicePoint.Expect100Continue = item.Expect100Continue;
             //请求方式Get或者Post
-            _request.Method = objhttpItem.Method;
-            _request.Timeout = objhttpItem.Timeout;
-            _request.ReadWriteTimeout = objhttpItem.ReadWriteTimeout;
+            request.Method = item.Method;
+            request.Timeout = item.Timeout;
+            request.KeepAlive = item.KeepAlive;
+            request.ReadWriteTimeout = item.ReadWriteTimeout;
+            if (!string.IsNullOrWhiteSpace(item.Host))
+            {
+                request.Host = item.Host;
+            }
+            if (item.IfModifiedSince != null) request.IfModifiedSince = Convert.ToDateTime(item.IfModifiedSince);
             //Accept
-            _request.Accept = objhttpItem.Accept;
+            request.Accept = item.Accept;
             //ContentType返回类型
-            _request.ContentType = objhttpItem.ContentType;
+            request.ContentType = item.ContentType;
             //UserAgent客户端的访问类型，包括浏览器版本和操作系统信息
-            _request.UserAgent = objhttpItem.UserAgent;
+            request.UserAgent = item.UserAgent;
             // 编码
-            _encoding = objhttpItem.Encoding;
+            encoding = item.Encoding;
+            //设置安全凭证
+            request.Credentials = item.ICredentials;
             //设置Cookie
-            SetCookie(objhttpItem);
+            SetCookie(item);
             //来源地址
-            _request.Referer = objhttpItem.Referer;
+            request.Referer = item.Referer;
             //是否执行跳转功能
-            _request.AllowAutoRedirect = objhttpItem.Allowautoredirect;
+            request.AllowAutoRedirect = item.Allowautoredirect;
+            if (item.MaximumAutomaticRedirections > 0)
+            {
+                request.MaximumAutomaticRedirections = item.MaximumAutomaticRedirections;
+            }
             //设置Post数据
-            SetPostData(objhttpItem);
+            SetPostData(item);
             //设置最大连接
-            if (objhttpItem.Connectionlimit > 0) _request.ServicePoint.ConnectionLimit = objhttpItem.Connectionlimit;
+            if (item.Connectionlimit > 0) request.ServicePoint.ConnectionLimit = item.Connectionlimit;
         }
-
         /// <summary>
         /// 设置证书
         /// </summary>
-        /// <param name="objhttpItem"></param>
-        private void SetCer(HttpItem objhttpItem)
+        /// <param name="item"></param>
+        private void SetCer(HttpItem item)
         {
-            if (!string.IsNullOrEmpty(objhttpItem.CerPath))
+            if (!string.IsNullOrWhiteSpace(item.CerPath))
             {
                 //这一句一定要写在创建连接的前面。使用回调的方法进行证书验证。
-                ServicePointManager.ServerCertificateValidationCallback = CheckValidationResult;
+                ServicePointManager.ServerCertificateValidationCallback = new System.Net.Security.RemoteCertificateValidationCallback(CheckValidationResult);
                 //初始化对像，并设置请求的URL地址
-                _request = (HttpWebRequest)WebRequest.Create(objhttpItem.URL);
-                SetCerList(objhttpItem);
+                request = (HttpWebRequest)WebRequest.Create(item.URL);
+                SetCerList(item);
                 //将证书添加到请求里
-                _request.ClientCertificates.Add(new X509Certificate(objhttpItem.CerPath));
+                request.ClientCertificates.Add(new X509Certificate(item.CerPath));
             }
             else
             {
                 //初始化对像，并设置请求的URL地址
-                _request = (HttpWebRequest)WebRequest.Create(objhttpItem.URL);
-                SetCerList(objhttpItem);
+                request = (HttpWebRequest)WebRequest.Create(item.URL);
+                SetCerList(item);
             }
         }
-
         /// <summary>
         /// 设置多个证书
         /// </summary>
-        /// <param name="objhttpItem"></param>
-        private void SetCerList(HttpItem objhttpItem)
+        /// <param name="item"></param>
+        private void SetCerList(HttpItem item)
         {
-            if (objhttpItem.ClentCertificates == null || objhttpItem.ClentCertificates.Count <= 0) return;
-            foreach (X509Certificate item in objhttpItem.ClentCertificates)
+            if (item.ClentCertificates != null && item.ClentCertificates.Count > 0)
             {
-                _request.ClientCertificates.Add(item);
+                foreach (X509Certificate c in item.ClentCertificates)
+                {
+                    request.ClientCertificates.Add(c);
+                }
             }
         }
-
         /// <summary>
         /// 设置Cookie
         /// </summary>
-        /// <param name="objhttpItem">Http参数</param>
-        private void SetCookie(HttpItem objhttpItem)
+        /// <param name="item">Http参数</param>
+        private void SetCookie(HttpItem item)
         {
-            if (!string.IsNullOrEmpty(objhttpItem.Cookie))
-                //Cookie
-                _request.Headers[HttpRequestHeader.Cookie] = objhttpItem.Cookie;
-            //设置Cookie
-            if (objhttpItem.CookieCollection == null) return;
-            _request.CookieContainer = new CookieContainer();
-            _request.CookieContainer.Add(objhttpItem.CookieCollection);
+            if (!string.IsNullOrEmpty(item.Cookie)) request.Headers[HttpRequestHeader.Cookie] = item.Cookie;
+            //设置CookieCollection
+            if (item.ResultCookieType == ResultCookieType.CookieCollection)
+            {
+                request.CookieContainer = new CookieContainer();
+                if (item.CookieCollection != null && item.CookieCollection.Count > 0)
+                    request.CookieContainer.Add(item.CookieCollection);
+            }
         }
-
         /// <summary>
         /// 设置Post数据
         /// </summary>
-        /// <param name="objhttpItem">Http参数</param>
-        private void SetPostData(HttpItem objhttpItem)
+        /// <param name="item">Http参数</param>
+        private void SetPostData(HttpItem item)
         {
             //验证在得到结果时是否有传入数据
-            if (!_request.Method.Trim().ToLower().Contains("post")) return;
-            if (objhttpItem.PostEncoding != null)
+            if (!request.Method.Trim().ToLower().Contains("get"))
             {
-                _postencoding = objhttpItem.PostEncoding;
-            }
-            byte[] buffer = null;
-            //写入Byte类型
-            if (objhttpItem.PostDataType == PostDataType.Byte && objhttpItem.PostdataByte != null && objhttpItem.PostdataByte.Length > 0)
-            {
-                //验证在得到结果时是否有传入数据
-                buffer = objhttpItem.PostdataByte;
-            }//写入文件
-            else if (objhttpItem.PostDataType == PostDataType.FilePath && !string.IsNullOrEmpty(objhttpItem.Postdata))
-            {
-                var r = new StreamReader(objhttpItem.Postdata, _postencoding);
-                buffer = _postencoding.GetBytes(r.ReadToEnd());
-                r.Close();
-            } //写入字符串
-            else if (!string.IsNullOrEmpty(objhttpItem.Postdata))
-            {
-                buffer = _postencoding.GetBytes(objhttpItem.Postdata);
-            }
-            if (buffer != null)
-            {
-                _request.ContentLength = buffer.Length;
-                _request.GetRequestStream().Write(buffer, 0, buffer.Length);
+                if (item.PostEncoding != null)
+                {
+                    postencoding = item.PostEncoding;
+                }
+                byte[] buffer = null;
+                //写入Byte类型
+                if (item.PostDataType == PostDataType.Byte && item.PostdataByte != null && item.PostdataByte.Length > 0)
+                {
+                    //验证在得到结果时是否有传入数据
+                    buffer = item.PostdataByte;
+                }//写入文件
+                else if (item.PostDataType == PostDataType.FilePath && !string.IsNullOrWhiteSpace(item.Postdata))
+                {
+                    StreamReader r = new StreamReader(item.Postdata, postencoding);
+                    buffer = postencoding.GetBytes(r.ReadToEnd());
+                    r.Close();
+                } //写入字符串
+                else if (!string.IsNullOrWhiteSpace(item.Postdata))
+                {
+                    buffer = postencoding.GetBytes(item.Postdata);
+                }
+                if (buffer != null)
+                {
+                    request.ContentLength = buffer.Length;
+                    request.GetRequestStream().Write(buffer, 0, buffer.Length);
+                }
+                else
+                {
+                    request.ContentLength = 0;
+                }
             }
         }
-
         /// <summary>
         /// 设置代理
         /// </summary>
-        /// <param name="objhttpItem">参数对象</param>
-        private void SetProxy(HttpItem objhttpItem)
+        /// <param name="item">参数对象</param>
+        private void SetProxy(HttpItem item)
         {
-            if (string.IsNullOrEmpty(objhttpItem.ProxyIp)) return;
-            //设置代理服务器
-            if (objhttpItem.ProxyIp.Contains(":"))
+            bool isIeProxy = false;
+            if (!string.IsNullOrWhiteSpace(item.ProxyIp))
             {
-                string[] plist = objhttpItem.ProxyIp.Split(':');
-                var myProxy = new WebProxy(plist[0].Trim(), Convert.ToInt32(plist[1].Trim()))
+                isIeProxy = item.ProxyIp.ToLower().Contains("ieproxy");
+            }
+            if (!string.IsNullOrWhiteSpace(item.ProxyIp) && !isIeProxy)
+            {
+                //设置代理服务器
+                if (item.ProxyIp.Contains(":"))
                 {
-                    Credentials = new NetworkCredential(objhttpItem.ProxyUserName, objhttpItem.ProxyPwd)
-                };
-                //建议连接
-                //给当前请求对象
-                _request.Proxy = myProxy;
+                    string[] plist = item.ProxyIp.Split(':');
+                    WebProxy myProxy = new WebProxy(plist[0].Trim(), Convert.ToInt32(plist[1].Trim()));
+                    //建议连接
+                    myProxy.Credentials = new NetworkCredential(item.ProxyUserName, item.ProxyPwd);
+                    //给当前请求对象
+                    request.Proxy = myProxy;
+                }
+                else
+                {
+                    WebProxy myProxy = new WebProxy(item.ProxyIp, false);
+                    //建议连接
+                    myProxy.Credentials = new NetworkCredential(item.ProxyUserName, item.ProxyPwd);
+                    //给当前请求对象
+                    request.Proxy = myProxy;
+                }
+            }
+            else if (isIeProxy)
+            {
+                //设置为IE代理
             }
             else
             {
-                var myProxy = new WebProxy(objhttpItem.ProxyIp, false)
-                {
-                    Credentials = new NetworkCredential(objhttpItem.ProxyUserName, objhttpItem.ProxyPwd)
-                };
-                //建议连接
-                //给当前请求对象
-                _request.Proxy = myProxy;
+                request.Proxy = item.WebProxy;
             }
-            //设置安全凭证
-            _request.Credentials = CredentialCache.DefaultNetworkCredentials;
         }
 
+
+        #endregion
+
+        #region private main
         /// <summary>
         /// 回调验证证书问题
         /// </summary>
@@ -294,10 +422,23 @@ namespace SpiderCore
         /// <param name="chain">X509Chain</param>
         /// <param name="errors">SslPolicyErrors</param>
         /// <returns>bool</returns>
-        private static bool CheckValidationResult(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) { return true; }
+        private bool CheckValidationResult(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) { return true; }
 
+        /// <summary>
+        /// 通过设置这个属性，可以在发出连接的时候绑定客户端发出连接所使用的IP地址。 
+        /// </summary>
+        /// <param name="servicePoint"></param>
+        /// <param name="remoteEndPoint"></param>
+        /// <param name="retryCount"></param>
+        /// <returns></returns>
+        private IPEndPoint BindIPEndPointCallback(ServicePoint servicePoint, IPEndPoint remoteEndPoint, int retryCount)
+        {
+            return _IPEndPoint;//端口号
+        }
+        #endregion
     }
 
+    #region public calss
     /// <summary>
     /// Http请求参考类
     /// </summary>
@@ -307,222 +448,248 @@ namespace SpiderCore
         /// 请求URL必须填写
         /// </summary>
         public string URL { get; set; }
-
-        string _method = "GET";
+        string _Method = "GET";
         /// <summary>
         /// 请求方式默认为GET方式,当为POST方式时必须设置Postdata的值
         /// </summary>
         public string Method
         {
-            get { return _method; }
-            set { _method = value; }
+            get { return _Method; }
+            set { _Method = value; }
         }
-
-        int _timeout = 100000;
+        int _Timeout = 100000;
         /// <summary>
         /// 默认请求超时时间
         /// </summary>
         public int Timeout
         {
-            get { return _timeout; }
-            set { _timeout = value; }
+            get { return _Timeout; }
+            set { _Timeout = value; }
         }
-
-        int _readWriteTimeout = 30000;
+        int _ReadWriteTimeout = 30000;
         /// <summary>
         /// 默认写入Post数据超时间
         /// </summary>
         public int ReadWriteTimeout
         {
-            get { return _readWriteTimeout; }
-            set { _readWriteTimeout = value; }
+            get { return _ReadWriteTimeout; }
+            set { _ReadWriteTimeout = value; }
         }
-
-        string _accept = "text/html, application/xhtml+xml, */*";
+        /// <summary>
+        /// 设置Host的标头信息
+        /// </summary>
+        public string Host { get; set; }
+        Boolean _KeepAlive = true;
+        /// <summary>
+        ///  获取或设置一个值，该值指示是否与 Internet 资源建立持久性连接默认为true。
+        /// </summary>
+        public Boolean KeepAlive
+        {
+            get { return _KeepAlive; }
+            set { _KeepAlive = value; }
+        }
+        string _Accept = "text/html, application/xhtml+xml, */*";
         /// <summary>
         /// 请求标头值 默认为text/html, application/xhtml+xml, */*
         /// </summary>
         public string Accept
         {
-            get { return _accept; }
-            set { _accept = value; }
+            get { return _Accept; }
+            set { _Accept = value; }
         }
-
-        string _contentType = "text/html";
+        string _ContentType = "text/html";
         /// <summary>
         /// 请求返回类型默认 text/html
         /// </summary>
         public string ContentType
         {
-            get { return _contentType; }
-            set { _contentType = value; }
+            get { return _ContentType; }
+            set { _ContentType = value; }
         }
-
-        string _userAgent = "Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0)";
+        string _UserAgent = "Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0)";
         /// <summary>
         /// 客户端访问信息默认Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Trident/5.0)
         /// </summary>
         public string UserAgent
         {
-            get { return _userAgent; }
-            set { _userAgent = value; }
+            get { return _UserAgent; }
+            set { _UserAgent = value; }
         }
-
         /// <summary>
         /// 返回数据编码默认为NUll,可以自动识别,一般为utf-8,gbk,gb2312
         /// </summary>
         public Encoding Encoding { get; set; }
-
-        private PostDataType _postDataType = PostDataType.String;
+        private PostDataType _PostDataType = PostDataType.String;
         /// <summary>
         /// Post的数据类型
         /// </summary>
         public PostDataType PostDataType
         {
-            get { return _postDataType; }
-            set { _postDataType = value; }
+            get { return _PostDataType; }
+            set { _PostDataType = value; }
         }
-
-        string _postdata = string.Empty;
         /// <summary>
         /// Post请求时要发送的字符串Post数据
         /// </summary>
-        public string Postdata
-        {
-            get { return _postdata; }
-            set { _postdata = value; }
-        }
-
+        public string Postdata { get; set; }
         /// <summary>
         /// Post请求时要发送的Byte类型的Post数据
         /// </summary>
         public byte[] PostdataByte { get; set; }
-
         /// <summary>
         /// Cookie对象集合
         /// </summary>
         public CookieCollection CookieCollection { get; set; }
-
-        string _cookie = string.Empty;
         /// <summary>
         /// 请求时的Cookie
         /// </summary>
-        public string Cookie
-        {
-            get { return _cookie; }
-            set { _cookie = value; }
-        }
-
-        string _referer = string.Empty;
+        public string Cookie { get; set; }
         /// <summary>
         /// 来源地址，上次访问地址
         /// </summary>
-        public string Referer
-        {
-            get { return _referer; }
-            set { _referer = value; }
-        }
-
-        string _cerPath = string.Empty;
+        public string Referer { get; set; }
         /// <summary>
         /// 证书绝对路径
         /// </summary>
-        public string CerPath
-        {
-            get { return _cerPath; }
-            set { _cerPath = value; }
-        }
-
+        public string CerPath { get; set; }
+        /// <summary>
+        /// 设置代理对象，不想使用IE默认配置就设置为Null，而且不要设置ProxyIp
+        /// </summary>
+        public WebProxy WebProxy { get; set; }
+        private Boolean isToLower = false;
         /// <summary>
         /// 是否设置为全文小写，默认为不转化
         /// </summary>
-        public bool IsToLower { get; set; }
-
+        public Boolean IsToLower
+        {
+            get { return isToLower; }
+            set { isToLower = value; }
+        }
+        private Boolean allowautoredirect = false;
         /// <summary>
         /// 支持跳转页面，查询结果将是跳转后的页面，默认是不跳转
         /// </summary>
-        public bool Allowautoredirect { get; set; }
-
-        private int _connectionlimit = 1024;
+        public Boolean Allowautoredirect
+        {
+            get { return allowautoredirect; }
+            set { allowautoredirect = value; }
+        }
+        private int connectionlimit = 1024;
         /// <summary>
         /// 最大连接数
         /// </summary>
         public int Connectionlimit
         {
-            get { return _connectionlimit; }
-            set { _connectionlimit = value; }
+            get { return connectionlimit; }
+            set { connectionlimit = value; }
         }
-
         /// <summary>
         /// 代理Proxy 服务器用户名
         /// </summary>
         public string ProxyUserName { get; set; }
-
         /// <summary>
         /// 代理 服务器密码
         /// </summary>
         public string ProxyPwd { get; set; }
-
         /// <summary>
-        /// 代理 服务IP
+        /// 代理 服务IP,如果要使用IE代理就设置为ieproxy
         /// </summary>
         public string ProxyIp { get; set; }
-
-        private ResultType _resulttype = ResultType.String;
+        private ResultType resulttype = ResultType.String;
         /// <summary>
         /// 设置返回类型String和Byte
         /// </summary>
         public ResultType ResultType
         {
-            get { return _resulttype; }
-            set { _resulttype = value; }
+            get { return resulttype; }
+            set { resulttype = value; }
         }
-
-        private WebHeaderCollection _header = new WebHeaderCollection();
+        private WebHeaderCollection header = new WebHeaderCollection();
         /// <summary>
         /// header对象
         /// </summary>
         public WebHeaderCollection Header
         {
-            get { return _header; }
-            set { _header = value; }
+            get { return header; }
+            set { header = value; }
         }
-
         /// <summary>
-        /// 获取或设置用于请求的 HTTP 版本。返回结果:用于请求的 HTTP 版本。默认为 System.Net.HttpVersion.Version11。
+        //     获取或设置用于请求的 HTTP 版本。返回结果:用于请求的 HTTP 版本。默认为 System.Net.HttpVersion.Version11。
         /// </summary>
         public Version ProtocolVersion { get; set; }
-
-        private Boolean _expect100Continue = true;
+        private Boolean _expect100continue = false;
         /// <summary>
         ///  获取或设置一个 System.Boolean 值，该值确定是否使用 100-Continue 行为。如果 POST 请求需要 100-Continue 响应，则为 true；否则为 false。默认值为 true。
         /// </summary>
         public Boolean Expect100Continue
         {
-            get { return _expect100Continue; }
-            set { _expect100Continue = value; }
+            get { return _expect100continue; }
+            set { _expect100continue = value; }
         }
-
         /// <summary>
         /// 设置509证书集合
         /// </summary>
         public X509CertificateCollection ClentCertificates { get; set; }
-
-        public HttpItem()
-        {
-            URL = string.Empty;
-            Allowautoredirect = false;
-            IsToLower = false;
-            CookieCollection = null;
-            Encoding = null;
-        }
-
         /// <summary>
         /// 设置或获取Post参数编码,默认的为Default编码
         /// </summary>
         public Encoding PostEncoding { get; set; }
-    }
+        private ResultCookieType _ResultCookieType = ResultCookieType.String;
+        /// <summary>
+        /// Cookie返回类型,默认的是只返回字符串类型
+        /// </summary>
+        public ResultCookieType ResultCookieType
+        {
+            get { return _ResultCookieType; }
+            set { _ResultCookieType = value; }
+        }
+        private ICredentials _ICredentials = CredentialCache.DefaultCredentials;
+        /// <summary>
+        /// 获取或设置请求的身份验证信息。
+        /// </summary>
+        public ICredentials ICredentials
+        {
+            get { return _ICredentials; }
+            set { _ICredentials = value; }
+        }
+        /// <summary>
+        /// 设置请求将跟随的重定向的最大数目
+        /// </summary>
+        public int MaximumAutomaticRedirections { get; set; }
+        private DateTime? _IfModifiedSince = null;
+        /// <summary>
+        /// 获取和设置IfModifiedSince，默认为当前日期和时间
+        /// </summary>
+        public DateTime? IfModifiedSince
+        {
+            get { return _IfModifiedSince; }
+            set { _IfModifiedSince = value; }
+        }
+        #region ip-port
+        private IPEndPoint _IPEndPoint = null;
+        /// <summary>
+        /// 设置本地的出口ip和端口
+        /// </summary>]
+        /// <example>
+        ///item.IPEndPoint = new IPEndPoint(IPAddress.Parse("192.168.1.1"),80);
+        /// </example>
+        public IPEndPoint IPEndPoint
+        {
+            get { return _IPEndPoint; }
+            set { _IPEndPoint = value; }
+        }
+        #endregion
 
+        private bool _isReset = false;
+        /// <summary>
+        /// 是否重置request,response的值，默认不重置，当设置为True时request,response将被设置为Null
+        /// </summary>
+        public bool IsReset
+        {
+            get { return _isReset; }
+            set { _isReset = value; }
+        }
+    }
     /// <summary>
     /// Http返回参数类
     /// </summary>
@@ -532,38 +699,71 @@ namespace SpiderCore
         /// Http请求返回的Cookie
         /// </summary>
         public string Cookie { get; set; }
-
         /// <summary>
         /// Cookie对象集合
         /// </summary>
         public CookieCollection CookieCollection { get; set; }
-
+        private string _html = string.Empty;
         /// <summary>
         /// 返回的String类型数据 只有ResultType.String时才返回数据，其它情况为空
         /// </summary>
-        public string Html { get; set; }
-
+        public string Html
+        {
+            get { return _html; }
+            set { _html = value; }
+        }
         /// <summary>
         /// 返回的Byte数组 只有ResultType.Byte时才返回数据，其它情况为空
         /// </summary>
         public byte[] ResultByte { get; set; }
-
         /// <summary>
         /// header对象
         /// </summary>
         public WebHeaderCollection Header { get; set; }
-
         /// <summary>
         /// 返回状态说明
         /// </summary>
         public string StatusDescription { get; set; }
-
         /// <summary>
         /// 返回状态码,默认为OK
         /// </summary>
         public HttpStatusCode StatusCode { get; set; }
+        /// <summary>
+        /// 最后访问的URl
+        /// </summary>
+        public string ResponseUri { get; set; }
+        /// <summary>
+        /// 获取重定向的URl
+        /// </summary>
+        public string RedirectUrl
+        {
+            get
+            {
+                try
+                {
+                    if (Header != null && Header.Count > 0)
+                    {
+                        if (Header.AllKeys.Any(k => k.ToLower().Contains("location")))
+                        {
+                            string baseurl = Header["location"].ToString().Trim();
+                            string locationurl = baseurl.ToLower();
+                            if (!string.IsNullOrWhiteSpace(locationurl))
+                            {
+                                bool b = locationurl.StartsWith("http://") || locationurl.StartsWith("https://");
+                                if (!b)
+                                {
+                                    baseurl = new Uri(new Uri(ResponseUri), baseurl).AbsoluteUri;
+                                }
+                            }
+                            return baseurl;
+                        }
+                    }
+                }
+                catch { }
+                return string.Empty;
+            }
+        }
     }
-
     /// <summary>
     /// 返回类型
     /// </summary>
@@ -573,13 +773,11 @@ namespace SpiderCore
         /// 表示只返回字符串 只有Html有数据
         /// </summary>
         String,
-
         /// <summary>
         /// 表示返回字符串和字节流 ResultByte和Html都有数据返回
         /// </summary>
         Byte
     }
-
     /// <summary>
     /// Post的数据格式默认为string
     /// </summary>
@@ -589,16 +787,28 @@ namespace SpiderCore
         /// 字符串类型，这时编码Encoding可不设置
         /// </summary>
         String,
-
         /// <summary>
         /// Byte类型，需要设置PostdataByte参数的值编码Encoding可设置为空
         /// </summary>
         Byte,
-
         /// <summary>
         /// 传文件，Postdata必须设置为文件的绝对路径，必须设置Encoding的值
         /// </summary>
         FilePath
     }
-
+    /// <summary>
+    /// Cookie返回类型
+    /// </summary>
+    public enum ResultCookieType
+    {
+        /// <summary>
+        /// 只返回字符串类型的Cookie
+        /// </summary>
+        String,
+        /// <summary>
+        /// CookieCollection格式的Cookie集合同时也返回String类型的cookie
+        /// </summary>
+        CookieCollection
+    }
+    #endregion
 }
